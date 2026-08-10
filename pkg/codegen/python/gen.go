@@ -476,12 +476,24 @@ func typingImports() []string {
 	}
 }
 
-// typingImports returns the `typing` names the module's files import. `Literal` is only imported by
-// modules that hold a discriminated union member, whose discriminator property is typed as one.
+// typingImports returns the `typing` names a file imports. Only the generated types files
+// render a discriminated union member's discriminator property as a `Literal`, so only they
+// ask for it; adding it everywhere would churn every other file in the module.
 func (mod *modContext) typingImports() []string {
+	return typingImports()
+}
+
+// typingImportsForTypes is typingImports for a generated types file. A discriminated union
+// member renders its discriminator property as a `Literal`, so the file imports it only when
+// it actually emits such a member — matching the same input/output split the file's `__all__`
+// uses. Importing it unconditionally would touch every module that has a union anywhere.
+func (mod *modContext) typingImportsForTypes(input bool) []string {
 	imports := typingImports()
 	for _, t := range mod.types {
-		if mod.unionCase(t) != nil {
+		if mod.unionCase(t) == nil {
+			continue
+		}
+		if input && mod.details(t).inputType || !input && mod.details(t).outputType {
 			return append([]string{"Any", "Literal"}, imports[1:]...)
 		}
 	}
@@ -510,6 +522,12 @@ func (mod *modContext) generateCommonImports(w io.Writer, imports imports, typin
 }
 
 func (mod *modContext) genHeader(w io.Writer, needsSDK bool, imports imports) {
+	mod.genHeaderWithTypings(w, needsSDK, imports, mod.typingImports())
+}
+
+// genHeaderWithTypings is genHeader for callers that need a different `typing` import list,
+// e.g. the types files, which import `Literal`.
+func (mod *modContext) genHeaderWithTypings(w io.Writer, needsSDK bool, imports imports, typings []string) {
 	genStandardHeader(w, mod.tool)
 
 	// Always import builtins as we use fully qualified type names `builtins.int` rather than just `int`.
@@ -517,7 +535,6 @@ func (mod *modContext) genHeader(w io.Writer, needsSDK bool, imports imports) {
 
 	// If needed, emit the standard Pulumi SDK import statement.
 	if needsSDK {
-		typings := mod.typingImports()
 		mod.generateCommonImports(w, imports, typings)
 	}
 }
@@ -1236,7 +1253,7 @@ func (mod *modContext) genTypes(dir string, fs codegen.Fs) error {
 			imports.addEnum(mod, e)
 		}
 
-		mod.genHeader(w, true /*needsSDK*/, imports)
+		mod.genHeaderWithTypings(w, true /*needsSDK*/, imports, mod.typingImportsForTypes(input))
 
 		// Export only the symbols we want exported.
 		fmt.Fprintf(w, "__all__ = [\n")

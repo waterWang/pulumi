@@ -779,7 +779,13 @@ def discriminated_union_cases(typ: Any) -> Optional[tuple[str, dict[str, type]]]
         if property_name is None:
             property_name = name
         elif property_name != name:
-            return None
+            # A schema gives every member of a union the same discriminator property, so
+            # disagreement here means the generated markers are wrong. Failing loudly beats
+            # silently falling back to shape matching, which would mis-resolve at runtime.
+            raise AssertionError(
+                f"discriminated union members disagree on the discriminator property: "
+                f"{property_name!r} != {name!r}"
+            )
         # Two cases claiming the same tag would make dispatch ambiguous.
         if tag in cases:
             return None
@@ -790,7 +796,7 @@ def discriminated_union_cases(typ: Any) -> Optional[tuple[str, dict[str, type]]]
     return (property_name, cases)
 
 
-def py_name_for(cls: type, pulumi_name: str) -> Optional[str]:
+def _py_name_for(cls: type, pulumi_name: str) -> Optional[str]:
     """
     Returns the Python name of the property of `cls` whose Pulumi name is `pulumi_name`.
     """
@@ -823,7 +829,7 @@ def select_discriminated_union_case(
     tag = _lookup(value, property_name)
     if tag is MISSING:
         for case in mapping.values():
-            python_name = py_name_for(case, property_name)
+            python_name = _py_name_for(case, property_name)
             if python_name is None:
                 continue
             tag = _lookup(value, python_name)

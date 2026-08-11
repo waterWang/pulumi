@@ -848,10 +848,7 @@ func (b *diyBackend) CreateStack(
 		}
 	}
 
-	stack := newStack(diyStackRef, b)
-	b.d.Infof(diag.Message("", "Created stack '%s'"), stack.Ref())
-
-	return stack, nil
+	return newStack(diyStackRef, b), nil
 }
 
 func (b *diyBackend) GetStack(ctx context.Context, stackRef backend.StackReference) (backend.Stack, error) {

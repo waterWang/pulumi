@@ -57,4 +57,8 @@ type Snippet struct {
 	// is the identifier used inside Code; the value identifies the target resource by its URN. The target need not be
 	// present in the snapshot, but it must be registered during an update before the snippet can run.
 	References map[string]string `json:"references,omitempty" yaml:"references,omitempty"`
+	// PendingDelete is true if deletion of this snippet has been requested but its resources have not all been
+	// removed yet. Pending-delete snippets are not evaluated during updates; they are removed from the snapshot
+	// once their resources are gone, or revived by an upsert.
+	PendingDelete bool `json:"pendingDelete,omitempty" yaml:"pendingDelete,omitempty"`
 }

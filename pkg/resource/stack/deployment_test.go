@@ -448,6 +448,35 @@ func TestSnippetRoundTrip(t *testing.T) {
 	require.Equal(t, snap.Snippets, roundTripped.Snippets)
 }
 
+// TestSnippetTombstoneRoundTrip verifies that a pending-delete snippet round-trips through an
+// untyped deployment and that its presence is gated by the "snippet-tombstones-prototype" feature.
+func TestSnippetTombstoneRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	snap := &deploy.Snapshot{
+		Snippets: []resource.Snippet{
+			{
+				UUID: "89ed2ff3-1139-54c2-b53b-c3d9fb860da6",
+				Name: "r1", Type: "pkgA:index:res",
+				Descriptor:    resource.PackageDescriptor{Name: "pkgA"},
+				Code:          `propA = true`,
+				PendingDelete: true,
+			},
+		},
+	}
+
+	untyped, err := SerializeUntypedDeployment(ctx, snap, nil)
+	require.NoError(t, err)
+	require.Equal(t, DeploymentSchemaVersionLatest, untyped.Version)
+	require.Equal(t, []string{snippetTombstonesFeature, snippetsFeature}, untyped.Features)
+	require.NoError(t, ValidateUntypedDeployment(untyped))
+
+	roundTripped, err := DeserializeUntypedDeployment(ctx, untyped, b64.Base64SecretsProvider)
+	require.NoError(t, err)
+	require.Equal(t, snap.Snippets, roundTripped.Snippets)
+}
+
 // TestResourceSnippetIDRoundTrip verifies that a resource carrying a SnippetID round-trips through
 // an untyped deployment, passes schema validation, and triggers the "snippets" feature flag even
 // when the snapshot has no Snippets attached (the resource is orphaned from a deleted snippet).

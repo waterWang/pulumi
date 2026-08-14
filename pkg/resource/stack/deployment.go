@@ -76,6 +76,7 @@ const (
 	taintFeature                     = "taint"
 	replaceWithFeature               = "replaceWith"
 	snippetsFeature                  = "snippets-prototype"
+	snippetTombstonesFeature         = "snippet-tombstones-prototype"
 	extensionParameterizationFeature = "extensionParameterization"
 	byteStringFeature                = "byteString"
 )
@@ -135,6 +136,7 @@ var supportedFeatures = map[string]bool{
 	taintFeature:                     true,
 	replaceWithFeature:               true,
 	snippetsFeature:                  true,
+	snippetTombstonesFeature:         true,
 	extensionParameterizationFeature: true,
 	byteStringFeature:                true,
 }
@@ -310,6 +312,9 @@ func SerializeDeploymentWithMetadata(
 		snippets = make([]apitype.SnippetV1, len(snap.Snippets))
 		for i, s := range snap.Snippets {
 			snippets[i] = SerializeSnippet(s)
+			if s.PendingDelete {
+				featureMap[snippetTombstonesFeature] = true
+			}
 		}
 		featureMap[snippetsFeature] = true
 	}
@@ -349,12 +354,13 @@ func SerializeSnippet(s resource.Snippet) apitype.SnippetV1 {
 		maps.Copy(refs, s.References)
 	}
 	return apitype.SnippetV1{
-		UUID:       s.UUID,
-		Name:       s.Name,
-		Type:       s.Type,
-		Code:       s.Code,
-		Descriptor: serializePackageDescriptor(s.Descriptor),
-		References: refs,
+		UUID:          s.UUID,
+		Name:          s.Name,
+		Type:          s.Type,
+		Code:          s.Code,
+		Descriptor:    serializePackageDescriptor(s.Descriptor),
+		References:    refs,
+		PendingDelete: s.PendingDelete,
 	}
 }
 
@@ -382,12 +388,13 @@ func DeserializeSnippet(s apitype.SnippetV1) resource.Snippet {
 		maps.Copy(refs, s.References)
 	}
 	return resource.Snippet{
-		UUID:       s.UUID,
-		Name:       s.Name,
-		Type:       s.Type,
-		Code:       s.Code,
-		Descriptor: deserializePackageDescriptor(s.Descriptor),
-		References: refs,
+		UUID:          s.UUID,
+		Name:          s.Name,
+		Type:          s.Type,
+		Code:          s.Code,
+		Descriptor:    deserializePackageDescriptor(s.Descriptor),
+		References:    refs,
+		PendingDelete: s.PendingDelete,
 	}
 }
 

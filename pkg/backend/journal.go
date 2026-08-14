@@ -433,6 +433,11 @@ func (r *JournalReplayer) GenerateDeployment() (apitype.TypedDeployment, error) 
 
 	if len(deployment.Snippets) > 0 {
 		features["snippets-prototype"] = true
+		for _, s := range deployment.Snippets {
+			if s.PendingDelete {
+				features["snippet-tombstones-prototype"] = true
+			}
+		}
 	}
 
 	version := apitype.DeploymentSchemaVersionCurrent

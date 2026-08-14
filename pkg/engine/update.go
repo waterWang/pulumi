@@ -554,9 +554,10 @@ func Update(u UpdateInfo, ctx *Context, opts UpdateOptions, dryRun bool) (
 	if err != nil {
 		return nil, nil, err
 	}
-	// Snippet deletions are held back until the resources they registered are gone: removing a
-	// snippet whose resource delete then fails would orphan the resource with no way to retry
-	// the deletion.
+	// Snippet deletions are held back until the resources they registered are gone: the snippet is
+	// marked pending-delete when the deletion is requested, and removed from the snapshot only once
+	// none of its resources remain. This keeps a failed delete retryable and records the deletion
+	// intent, so nothing re-evaluates the snippet and recreates its resources in the meantime.
 	var snippetsPre []resource.Snippet
 	var snippetDeletions *snippetDeletionTracker
 	if len(opts.Snippets) > 0 {
@@ -571,11 +572,26 @@ func Update(u UpdateInfo, ctx *Context, opts UpdateOptions, dryRun bool) (
 			}
 			upserts[id] = snippet
 		}
+		// Sweep up snippets left pending-delete by earlier operations, unless this operation
+		// revives them: they are removed as soon as none of their resources remain, without their
+		// resources being targeted again.
+		for _, s := range baseSnippets {
+			if s.PendingDelete {
+				if id, perr := uuid.FromString(s.UUID); perr != nil || upserts[id] == nil {
+					deleted[s.UUID] = true
+				}
+			}
+		}
 		snippetsPre = effectiveSnippets
 		if len(deleted) > 0 {
 			snippetsPre, err = applySnippetUpdates(baseSnippets, upserts)
 			if err != nil {
 				return nil, nil, err
+			}
+			for i := range snippetsPre {
+				if deleted[snippetsPre[i].UUID] {
+					snippetsPre[i].PendingDelete = true
+				}
 			}
 			var oldResources []*pkgresource.State
 			if u.Target != nil && u.Target.Snapshot != nil {
@@ -691,6 +707,11 @@ func persistValidatedSnippets(
 	for _, snippet := range validate {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// Pending-delete snippets are never evaluated, so they need not validate; requiring it
+		// would make their package's plugin a prerequisite for deleting them.
+		if snippet.PendingDelete {
+			continue
 		}
 		if err := deploy.ValidateSnippet(ctx, snippet, loader); err != nil {
 			return err
@@ -1161,10 +1182,15 @@ func newUpdateSource(ctx context.Context,
 		// We need a loader for snippets
 		loader := schema.NewPluginLoader(plugctx)
 
-		snippetSources := make([]func(string) *promise.Promise[struct{}], len(target.Snapshot.Snippets))
-		for i, snippet := range target.Snapshot.Snippets {
-			snippetSources[i] = deploy.NewSnippetSource(
-				ctx, snippet, loader, runinfo.ProjectRoot, runinfo.Pwd, observer)
+		// Pending-delete snippets are not evaluated: their deletion has been requested, so nothing
+		// may re-register (and thereby recreate) their resources.
+		snippetSources := slice.Prealloc[func(string) *promise.Promise[struct{}]](len(target.Snapshot.Snippets))
+		for _, snippet := range target.Snapshot.Snippets {
+			if snippet.PendingDelete {
+				continue
+			}
+			snippetSources = append(snippetSources, deploy.NewSnippetSource(
+				ctx, snippet, loader, runinfo.ProjectRoot, runinfo.Pwd, observer))
 		}
 		program = deploy.NewMuxSource(ctx, observer, program, snippetSources...)
 	}

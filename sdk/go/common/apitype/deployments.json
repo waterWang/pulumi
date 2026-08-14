@@ -218,6 +218,10 @@
                     "additionalProperties": {
                         "type": "string"
                     }
+                },
+                "pendingDelete": {
+                    "description": "True if deletion of this snippet has been requested but its resources have not all been removed yet.",
+                    "type": "boolean"
                 }
             },
             "required": ["uuid", "name", "type", "code", "descriptor"],

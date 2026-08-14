@@ -306,6 +306,11 @@ type SnippetV1 struct {
 	// key is the identifier used inside Code; the value is the URN of the target resource. Subject to URN
 	// normalisation (aliases) on each snapshot write.
 	References map[string]string `json:"references,omitempty" yaml:"references,omitempty"`
+	// PendingDelete is true if deletion of this snippet has been requested but its resources have not all been
+	// removed yet. Deployments that include pending-delete snippets must declare the
+	// "snippet-tombstones-prototype" feature so older CLIs refuse the snapshot rather than evaluating a
+	// snippet whose deletion is pending.
+	PendingDelete bool `json:"pendingDelete,omitempty" yaml:"pendingDelete,omitempty"`
 }
 
 // PackageDescriptorV1 is the serialized form of a package descriptor for a snippet.

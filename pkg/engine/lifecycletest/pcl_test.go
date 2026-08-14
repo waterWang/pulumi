@@ -2030,6 +2030,7 @@ func TestPclSnippetDeleteFailureKeepsSnippet(t *testing.T) {
 	require.ErrorContains(t, err, "no valid credential sources found")
 	require.Len(t, snap.Snippets, 1, "failed delete must keep the snippet")
 	require.Equal(t, snippetUUID, snap.Snippets[0].UUID)
+	require.True(t, snap.Snippets[0].PendingDelete, "failed delete must mark the snippet pending-delete")
 	require.True(t, pclSnippetResourceNames(snap)["test-resource"], "failed delete must keep the resource")
 
 	// Retrying once the provider works again deletes the resource and removes the snippet.
@@ -2080,6 +2081,7 @@ func TestPclSnippetDeletePartialFailure(t *testing.T) {
 	require.ErrorContains(t, err, "no valid credential sources found")
 	require.Len(t, snap.Snippets, 1)
 	require.Equal(t, s1UUID, snap.Snippets[0].UUID)
+	require.True(t, snap.Snippets[0].PendingDelete)
 	names := pclSnippetResourceNames(snap)
 	require.True(t, names["r1"], "failed delete must keep its resource")
 	require.False(t, names["r2"], "successful delete must remove its resource")
@@ -2156,6 +2158,7 @@ func TestPclSnippetDeleteWithPendingDelete(t *testing.T) {
 		p.GetProject(), p.GetTarget(t, snap), deleteOpts, false, p.BackendClient, nil, "2")
 	require.ErrorContains(t, err, "no valid credential sources found")
 	require.Len(t, snap.Snippets, 1, "the snippet must survive while its live resource remains")
+	require.True(t, snap.Snippets[0].PendingDelete)
 	count := 0
 	for _, r := range snap.Resources {
 		if r.Type == "pkgA:index:res" {
@@ -2172,4 +2175,182 @@ func TestPclSnippetDeleteWithPendingDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, snap.Snippets)
 	require.Empty(t, pclSnippetResourceNames(snap))
+}
+
+// TestPclSnippetTombstoneBlocksRecreation checks that a pending-delete snippet is never evaluated
+// again: a subsequent unconstrained update completes the deletion instead of re-registering the
+// resource, and the leftover tombstone is swept by the next snippet operation.
+func TestPclSnippetTombstoneBlocksRecreation(t *testing.T) {
+	t.Parallel()
+
+	var deleteFails atomic.Bool
+	p := pclSnippetDeleteFailPlan(t, func(plugin.DeleteRequest) bool { return deleteFails.Load() })
+
+	xUUID := newPclSnippetUUID(t)
+	snap := deploy.NewSnapshot(deploy.Manifest{}, nil, nil, nil, deploy.SnapshotMetadata{}, []resource.Snippet{
+		pclSnippetForRes(xUUID, "resX", `propA = true`),
+	}, nil)
+	snap, err := lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), p.Options, false, p.BackendClient, nil, "0")
+	require.NoError(t, err)
+
+	deleteFails.Store(true)
+	deleteOpts := p.Options
+	deleteOpts.UpdateOptions = UpdateOptions{
+		Snippets:       map[uuid.UUID]*resource.Snippet{uuid.Must(uuid.FromString(xUUID)): nil},
+		TargetSnippets: []string{xUUID},
+	}
+	snap, err = lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), deleteOpts, false, p.BackendClient, nil, "1")
+	require.ErrorContains(t, err, "no valid credential sources found")
+	require.True(t, snap.Snippets[0].PendingDelete)
+
+	// An unconstrained update does not re-register the tombstoned snippet's resource; it deletes
+	// it, like an up whose program no longer contains the resource.
+	deleteFails.Store(false)
+	snap, err = lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), p.Options, false, p.BackendClient, nil, "2")
+	require.NoError(t, err)
+	require.Empty(t, pclSnippetResourceNames(snap), "the unconstrained update should complete the deletion")
+	require.Len(t, snap.Snippets, 1, "a plain update does not touch the snippet list")
+	require.True(t, snap.Snippets[0].PendingDelete)
+
+	// The next snippet operation sweeps the resourceless tombstone.
+	yUUID := newPclSnippetUUID(t)
+	upsertOpts := p.Options
+	upsertOpts.UpdateOptions = UpdateOptions{
+		Snippets: map[uuid.UUID]*resource.Snippet{
+			uuid.Must(uuid.FromString(yUUID)): {
+				UUID: yUUID, Name: "resY", Type: "pkgA:index:res",
+				Descriptor: resource.PackageDescriptor{Name: "pkgA"},
+				Code:       `propA = false`,
+			},
+		},
+		TargetSnippets: []string{yUUID},
+	}
+	snap, err = lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), upsertOpts, false, p.BackendClient, nil, "3")
+	require.NoError(t, err)
+	require.Len(t, snap.Snippets, 1)
+	require.Equal(t, yUUID, snap.Snippets[0].UUID, "the tombstone should have been swept")
+	names := pclSnippetResourceNames(snap)
+	require.True(t, names["resY"])
+	require.False(t, names["resX"])
+}
+
+// TestPclSnippetTombstoneRevival checks that upserting a pending-delete snippet revives it: the
+// marker is cleared and the still-existing resource is kept rather than recreated.
+func TestPclSnippetTombstoneRevival(t *testing.T) {
+	t.Parallel()
+
+	var deleteFails atomic.Bool
+	p := pclSnippetDeleteFailPlan(t, func(plugin.DeleteRequest) bool { return deleteFails.Load() })
+
+	xUUID := newPclSnippetUUID(t)
+	snap := deploy.NewSnapshot(deploy.Manifest{}, nil, nil, nil, deploy.SnapshotMetadata{}, []resource.Snippet{
+		pclSnippetForRes(xUUID, "resX", `propA = true`),
+	}, nil)
+	snap, err := lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), p.Options, false, p.BackendClient, nil, "0")
+	require.NoError(t, err)
+	var originalID resource.ID
+	for _, r := range snap.Resources {
+		if r.Type == "pkgA:index:res" {
+			originalID = r.ID
+		}
+	}
+
+	deleteFails.Store(true)
+	deleteOpts := p.Options
+	deleteOpts.UpdateOptions = UpdateOptions{
+		Snippets:       map[uuid.UUID]*resource.Snippet{uuid.Must(uuid.FromString(xUUID)): nil},
+		TargetSnippets: []string{xUUID},
+	}
+	snap, err = lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), deleteOpts, false, p.BackendClient, nil, "1")
+	require.ErrorContains(t, err, "no valid credential sources found")
+	require.True(t, snap.Snippets[0].PendingDelete)
+
+	// Upserting the snippet again clears the marker and keeps the existing resource.
+	reviveOpts := p.Options
+	reviveOpts.UpdateOptions = UpdateOptions{
+		Snippets: map[uuid.UUID]*resource.Snippet{
+			uuid.Must(uuid.FromString(xUUID)): {
+				UUID: xUUID, Name: "resX", Type: "pkgA:index:res",
+				Descriptor: resource.PackageDescriptor{Name: "pkgA"},
+				Code:       `propA = true`,
+			},
+		},
+		TargetSnippets: []string{xUUID},
+	}
+	snap, err = lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), reviveOpts, false, p.BackendClient, nil, "2")
+	require.NoError(t, err)
+	require.Len(t, snap.Snippets, 1)
+	require.False(t, snap.Snippets[0].PendingDelete, "upsert should revive the snippet")
+	count := 0
+	for _, r := range snap.Resources {
+		if r.Type == "pkgA:index:res" {
+			count++
+			require.Equal(t, originalID, r.ID, "the existing resource should be kept, not recreated")
+		}
+	}
+	require.Equal(t, 1, count)
+}
+
+// TestPclSnippetTombstoneSkipsValidation checks that pending-delete snippets are not validated:
+// a tombstone whose code no longer binds must not block unrelated operations, and it is kept as
+// long as its resource remains.
+func TestPclSnippetTombstoneSkipsValidation(t *testing.T) {
+	t.Parallel()
+
+	var deleteFails atomic.Bool
+	p := pclSnippetDeleteFailPlan(t, func(plugin.DeleteRequest) bool { return deleteFails.Load() })
+
+	xUUID := newPclSnippetUUID(t)
+	snap := deploy.NewSnapshot(deploy.Manifest{}, nil, nil, nil, deploy.SnapshotMetadata{}, []resource.Snippet{
+		pclSnippetForRes(xUUID, "resX", `propA = true`),
+	}, nil)
+	snap, err := lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), p.Options, false, p.BackendClient, nil, "0")
+	require.NoError(t, err)
+
+	deleteFails.Store(true)
+	deleteOpts := p.Options
+	deleteOpts.UpdateOptions = UpdateOptions{
+		Snippets:       map[uuid.UUID]*resource.Snippet{uuid.Must(uuid.FromString(xUUID)): nil},
+		TargetSnippets: []string{xUUID},
+	}
+	snap, err = lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), deleteOpts, false, p.BackendClient, nil, "1")
+	require.ErrorContains(t, err, "no valid credential sources found")
+	require.True(t, snap.Snippets[0].PendingDelete)
+
+	// Corrupt the tombstone's code: since it is neither evaluated nor validated, an unrelated
+	// snippet operation must still succeed, and the tombstone survives while its resource does.
+	snap.Snippets[0].Code = `this is not ; valid pcl @@`
+	yUUID := newPclSnippetUUID(t)
+	upsertOpts := p.Options
+	upsertOpts.UpdateOptions = UpdateOptions{
+		Snippets: map[uuid.UUID]*resource.Snippet{
+			uuid.Must(uuid.FromString(yUUID)): {
+				UUID: yUUID, Name: "resY", Type: "pkgA:index:res",
+				Descriptor: resource.PackageDescriptor{Name: "pkgA"},
+				Code:       `propA = false`,
+			},
+		},
+		TargetSnippets: []string{yUUID},
+	}
+	snap, err = lt.TestOp(Update).RunStep(
+		p.GetProject(), p.GetTarget(t, snap), upsertOpts, false, p.BackendClient, nil, "2")
+	require.NoError(t, err)
+	require.Len(t, snap.Snippets, 2)
+	names := pclSnippetResourceNames(snap)
+	require.True(t, names["resX"], "the tombstoned snippet's resource must survive")
+	require.True(t, names["resY"])
+	for _, s := range snap.Snippets {
+		if s.UUID == xUUID {
+			require.True(t, s.PendingDelete, "the tombstone must be kept while its resource remains")
+		}
+	}
 }
